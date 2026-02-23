@@ -16,7 +16,6 @@ st.set_page_config(
 st.title("�� Buscador de Projetos")
 st.markdown("---")
 
-
 # Função para limpar descrições
 @st.cache_data
 def limpar_descricoes(descricoes):
@@ -27,6 +26,29 @@ def limpar_descricoes(descricoes):
         descrições_limpas.append(desc_limpa)
     return descrições_limpas
 
+# Função para remover colunas duplicadas
+def remover_colunas_duplicadas(df):
+    """Remove colunas duplicadas mantendo apenas a primeira ocorrência"""
+    colunas_originais = df.columns.tolist()
+    colunas_unicas = []
+    colunas_vistas = set()
+    
+    for col in colunas_originais:
+        if col not in colunas_vistas:
+            colunas_unicas.append(col)
+            colunas_vistas.add(col)
+        else:
+            # Renomear coluna duplicada
+            contador = 1
+            nova_col = f"{col}_{contador}"
+            while nova_col in colunas_vistas:
+                contador += 1
+                nova_col = f"{col}_{contador}"
+            colunas_unicas.append(nova_col)
+            colunas_vistas.add(nova_col)
+    
+    df.columns = colunas_unicas
+    return df
 
 # Função para processar arquivo carregado
 @st.cache_data
@@ -39,35 +61,68 @@ def processar_arquivo(arquivo_carregado):
                 df = pd.read_csv(arquivo_carregado, encoding='utf-8')
             except UnicodeDecodeError:
                 arquivo_carregado.seek(0)  # Reset file pointer
-                df = pd.read_csv(arquivo_carregado, encoding='latin-1')
+                try:
+                    df = pd.read_csv(arquivo_carregado, encoding='latin-1')
+                except UnicodeDecodeError:
+                    arquivo_carregado.seek(0)
+                    df = pd.read_csv(arquivo_carregado, encoding='cp1252')
         elif arquivo_carregado.name.endswith(('.xlsx', '.xls')):
             df = pd.read_excel(arquivo_carregado)
         else:
             st.error("❌ Formato de arquivo não suportado! Use CSV, XLS ou XLSX.")
             return None
 
+        # Remover colunas duplicadas
+        df = remover_colunas_duplicadas(df)
+        
+        # Remover colunas completamente vazias
+        df = df.dropna(axis=1, how='all')
+        
+        # Verificar se o DataFrame não está vazio
+        if df.empty:
+            st.error("❌ O arquivo está vazio ou não contém dados válidos!")
+            return None
+
         # Verificar se as colunas existem
         colunas_necessarias = ['ID do Projeto', 'Descrição', 'Custo proposto', 'Nome do Projeto']
         colunas_disponiveis = df.columns.tolist()
-
+        
         # Mapear colunas similares (case insensitive)
         mapeamento_colunas = {}
         for col_necessaria in colunas_necessarias:
+            melhor_match = None
+            melhor_score = 0
+            
             for col_disponivel in colunas_disponiveis:
-                if col_necessaria.lower() in col_disponivel.lower() or col_disponivel.lower() in col_necessaria.lower():
-                    mapeamento_colunas[col_necessaria] = col_disponivel
-                    break
-
+                # Calcular similaridade entre nomes de colunas
+                score = fuzz.ratio(col_necessaria.lower(), col_disponivel.lower())
+                if score > melhor_score and score >= 60:  # Threshold de 60%
+                    melhor_score = score
+                    melhor_match = col_disponivel
+            
+            if melhor_match:
+                mapeamento_colunas[col_necessaria] = melhor_match
+        
         # Verificar se todas as colunas foram encontradas
         colunas_faltando = [col for col in colunas_necessarias if col not in mapeamento_colunas]
-
+        
         if colunas_faltando:
             st.error(f"❌ Colunas não encontradas no arquivo: {', '.join(colunas_faltando)}")
             st.info("📋 Colunas disponíveis no arquivo:")
-            st.write(colunas_disponiveis)
-
+            
+            # Mostrar colunas disponíveis em formato mais legível
+            colunas_df = pd.DataFrame({
+                'Índice': range(len(colunas_disponiveis)),
+                'Nome da Coluna': colunas_disponiveis,
+                'Tipo de Dados': [str(df[col].dtype) for col in colunas_disponiveis],
+                'Valores Não Nulos': [df[col].notna().sum() for col in colunas_disponiveis]
+            })
+            st.dataframe(colunas_df, use_container_width=True)
+            
             # Permitir mapeamento manual
             st.subheader("🔧 Mapeamento Manual de Colunas")
+            mapeamento_manual = {}
+            
             for col_faltando in colunas_faltando:
                 opcao_selecionada = st.selectbox(
                     f"Selecione a coluna para '{col_faltando}':",
@@ -75,51 +130,87 @@ def processar_arquivo(arquivo_carregado):
                     key=f"map_{col_faltando}"
                 )
                 if opcao_selecionada != "Não mapear":
-                    mapeamento_colunas[col_faltando] = opcao_selecionada
+                    mapeamento_manual[col_faltando] = opcao_selecionada
+            
+            # Atualizar mapeamento com seleções manuais
+            mapeamento_colunas.update(mapeamento_manual)
+            
+            # Verificar se ainda faltam colunas
+            colunas_ainda_faltando = [col for col in colunas_necessarias if col not in mapeamento_colunas]
+            if colunas_ainda_faltando:
+                st.warning(f"⚠️ Ainda faltam as colunas: {', '.join(colunas_ainda_faltando)}")
+                return None
 
-            if st.button("🔄 Aplicar Mapeamento"):
-                st.rerun()
-
-            return None
-
-        # Renomear colunas conforme mapeamento
-        df_processado = df.copy()
+        # Criar DataFrame processado
+        df_processado = pd.DataFrame()
+        
         for col_nova, col_antiga in mapeamento_colunas.items():
-            if col_antiga in df_processado.columns:
-                df_processado = df_processado.rename(columns={col_antiga: col_nova})
+            if col_antiga in df.columns:
+                df_processado[col_nova] = df[col_antiga]
 
-        # Selecionar apenas as colunas necessárias e remover valores nulos
-        df_processado = df_processado[colunas_necessarias].dropna()
+        # Verificar se temos todas as colunas necessárias
+        for col in colunas_necessarias:
+            if col not in df_processado.columns:
+                st.error(f"❌ Coluna '{col}' não foi mapeada corretamente!")
+                return None
+
+        # Limpar dados
+        df_processado = df_processado.dropna(subset=colunas_necessarias)
 
         if df_processado.empty:
             st.error("❌ Nenhum dado válido encontrado após limpeza!")
             return None
 
+        # Converter tipos de dados
+        try:
+            # Tentar converter custo para numérico
+            df_processado['Custo proposto'] = pd.to_numeric(
+                df_processado['Custo proposto'], 
+                errors='coerce'
+            )
+            
+            # Remover linhas onde o custo não pôde ser convertido
+            df_processado = df_processado.dropna(subset=['Custo proposto'])
+            
+            if df_processado.empty:
+                st.error("❌ Nenhum valor de custo válido encontrado!")
+                return None
+                
+        except Exception as e:
+            st.warning(f"⚠️ Problema na conversão de custos: {str(e)}")
+
         # Limpar descrições
         descrições_limpas = limpar_descricoes(df_processado['Descrição'].tolist())
         df_processado['Descrições_limpas'] = descrições_limpas
 
-        return df_processado
+        # Verificar se ainda temos dados após todo o processamento
+        if len(df_processado) == 0:
+            st.error("❌ Nenhum dado válido restante após processamento!")
+            return None
 
+        st.success(f"✅ Arquivo processado com sucesso! {len(df_processado)} projetos carregados.")
+        
+        return df_processado
+        
     except Exception as e:
         st.error(f"❌ Erro ao processar arquivo: {str(e)}")
+        st.error("💡 Verifique se o arquivo não está corrompido e tente novamente.")
         return None
-
 
 # Sidebar para configurações e upload
 with st.sidebar:
     st.header("📁 Upload de Arquivo")
-
+    
     # Upload de arquivo
     arquivo_carregado = st.file_uploader(
         "Escolha um arquivo CSV, XLS ou XLSX",
         type=['csv', 'xlsx', 'xls'],
         help="Faça upload do arquivo contendo os dados dos projetos"
     )
-
+    
     if arquivo_carregado is not None:
         st.success(f"✅ Arquivo carregado: {arquivo_carregado.name}")
-
+        
         # Mostrar informações do arquivo
         file_details = {
             "Nome": arquivo_carregado.name,
@@ -127,11 +218,11 @@ with st.sidebar:
             "Tipo": arquivo_carregado.type
         }
         st.json(file_details)
-
+    
     st.markdown("---")
-
+    
     st.header("⚙️ Configurações")
-
+    
     # Configurações de busca
     st.subheader("🎯 Parâmetros de Busca")
     precisao = st.slider(
@@ -157,19 +248,19 @@ if arquivo_carregado is not None:
 else:
     # Mostrar instruções para upload
     st.info("📁 **Faça upload de um arquivo para começar a busca**")
-
+    
     st.markdown("""
     ### 📋 Instruções:
-
+    
     1. **📁 Faça upload** de um arquivo CSV, XLS ou XLSX na barra lateral
     2. **📊 Certifique-se** de que o arquivo contém as seguintes colunas:
        - `ID do Projeto` (ou similar)
        - `Nome do Projeto` (ou similar)
        - `Descrição` (ou similar)
        - `Custo proposto` (ou similar)
-    3. **🔍 Use a busca** para encontrar projetos similares
+    3. **�� Use a busca** para encontrar projetos similares
     """)
-
+    
     # Exemplo de dados
     st.subheader("📝 Exemplo de estrutura esperada:")
     exemplo_dados = pd.DataFrame({
@@ -183,7 +274,7 @@ else:
         'Custo proposto': [150000.00, 85000.00, 45000.00]
     })
     st.dataframe(exemplo_dados, use_container_width=True)
-
+    
     # Botão para download do exemplo
     csv_exemplo = exemplo_dados.to_csv(index=False)
     st.download_button(
@@ -193,7 +284,7 @@ else:
         mime="text/csv",
         help="Baixe este arquivo como exemplo de estrutura"
     )
-
+    
     info_df = None
 
 # Se os dados foram carregados com sucesso
@@ -327,7 +418,7 @@ if info_df is not None:
                 with tab3:
                     # Gráfico de similaridade
                     df_grafico = pd.DataFrame(resultados)
-                    st.subheader("�� Similaridade dos Projetos")
+                    st.subheader("🎯 Similaridade dos Projetos")
                     st.bar_chart(
                         data=df_grafico.set_index('Nome')['Similaridade'],
                         height=400
@@ -347,12 +438,31 @@ if info_df is not None:
                 st.write("• Use palavras-chave mais gerais")
                 st.write("• Verifique a ortografia")
 
-    # Mostrar preview dos dados
+    # Mostrar preview dos dados (com tratamento de erro)
     with st.expander("👀 Preview dos Dados Carregados"):
-        st.dataframe(
-            info_df[['ID do Projeto', 'Nome do Projeto', 'Custo proposto']].head(10),
-            use_container_width=True
-        )
+        try:
+            # Verificar se as colunas existem antes de tentar exibi-las
+            colunas_preview = []
+            for col in ['ID do Projeto', 'Nome do Projeto', 'Custo proposto']:
+                if col in info_df.columns:
+                    colunas_preview.append(col)
+            
+            if colunas_preview:
+                preview_df = info_df[colunas_preview].head(10)
+                # Remover possíveis colunas duplicadas no preview
+                preview_df = preview_df.loc[:, ~preview_df.columns.duplicated()]
+                st.dataframe(preview_df, use_container_width=True)
+            else:
+                st.warning("⚠️ Colunas para preview não encontradas")
+                st.dataframe(info_df.head(10), use_container_width=True)
+                
+        except Exception as e:
+            st.error(f"❌ Erro ao exibir preview: {str(e)}")
+            # Tentar mostrar informações básicas do DataFrame
+            st.write("**Informações do DataFrame:**")
+            st.write(f"- Número de linhas: {len(info_df)}")
+            st.write(f"- Número de colunas: {len(info_df.columns)}")
+            st.write(f"- Colunas: {list(info_df.columns)}")
 
 # Footer
 st.markdown("---")

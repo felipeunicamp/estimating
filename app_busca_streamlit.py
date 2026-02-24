@@ -2,475 +2,289 @@ import streamlit as st
 import pandas as pd
 from fuzzywuzzy import fuzz, process
 import re
-import io
+import nltk
+from nltk.corpus import stopwords
+from nltk.tokenize import word_tokenize
 
 # Configuração da página
 st.set_page_config(
-    page_title="🔍 Buscador de Projetos",
-    page_icon="🔍",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    page_title="Busca de Projetos",
+    page_icon="��",
+    layout="wide"
 )
 
-# Título principal
-st.title("�� Buscador de Projetos")
+# Título da aplicação
+st.title("🔍 Sistema de Busca de Projetos")
 st.markdown("---")
 
-# Função para limpar descrições
-@st.cache_data
-def limpar_descricoes(descricoes):
-    descrições_limpas = []
-    for desc in descricoes:
-        desc_limpa = str(desc).lower()
-        desc_limpa = re.sub(r'\s+', ' ', desc_limpa).strip()
-        descrições_limpas.append(desc_limpa)
-    return descrições_limpas
-
-# Função para remover colunas duplicadas
-def remover_colunas_duplicadas(df):
-    """Remove colunas duplicadas mantendo apenas a primeira ocorrência"""
-    colunas_originais = df.columns.tolist()
-    colunas_unicas = []
-    colunas_vistas = set()
-    
-    for col in colunas_originais:
-        if col not in colunas_vistas:
-            colunas_unicas.append(col)
-            colunas_vistas.add(col)
-        else:
-            # Renomear coluna duplicada
-            contador = 1
-            nova_col = f"{col}_{contador}"
-            while nova_col in colunas_vistas:
-                contador += 1
-                nova_col = f"{col}_{contador}"
-            colunas_unicas.append(nova_col)
-            colunas_vistas.add(nova_col)
-    
-    df.columns = colunas_unicas
-    return df
-
-# Função para processar arquivo carregado
-@st.cache_data
-def processar_arquivo(arquivo_carregado):
+# Download dos recursos do NLTK (com cache para evitar downloads repetidos)
+@st.cache_resource
+def download_nltk_resources():
     try:
-        # Detectar tipo de arquivo
-        if arquivo_carregado.name.endswith('.csv'):
-            # Tentar diferentes encodings para CSV
-            try:
-                df = pd.read_csv(arquivo_carregado, encoding='utf-8')
-            except UnicodeDecodeError:
-                arquivo_carregado.seek(0)  # Reset file pointer
-                try:
-                    df = pd.read_csv(arquivo_carregado, encoding='latin-1')
-                except UnicodeDecodeError:
-                    arquivo_carregado.seek(0)
-                    df = pd.read_csv(arquivo_carregado, encoding='cp1252')
-        elif arquivo_carregado.name.endswith(('.xlsx', '.xls')):
-            df = pd.read_excel(arquivo_carregado)
-        else:
-            st.error("❌ Formato de arquivo não suportado! Use CSV, XLS ou XLSX.")
-            return None
-
-        # Remover colunas duplicadas
-        df = remover_colunas_duplicadas(df)
-        
-        # Remover colunas completamente vazias
-        df = df.dropna(axis=1, how='all')
-        
-        # Verificar se o DataFrame não está vazio
-        if df.empty:
-            st.error("❌ O arquivo está vazio ou não contém dados válidos!")
-            return None
-
-        # Verificar se as colunas existem
-        colunas_necessarias = ['ID do Projeto', 'Descrição', 'Custo proposto', 'Nome do Projeto']
-        colunas_disponiveis = df.columns.tolist()
-        
-        # Mapear colunas similares (case insensitive)
-        mapeamento_colunas = {}
-        for col_necessaria in colunas_necessarias:
-            melhor_match = None
-            melhor_score = 0
-            
-            for col_disponivel in colunas_disponiveis:
-                # Calcular similaridade entre nomes de colunas
-                score = fuzz.ratio(col_necessaria.lower(), col_disponivel.lower())
-                if score > melhor_score and score >= 60:  # Threshold de 60%
-                    melhor_score = score
-                    melhor_match = col_disponivel
-            
-            if melhor_match:
-                mapeamento_colunas[col_necessaria] = melhor_match
-        
-        # Verificar se todas as colunas foram encontradas
-        colunas_faltando = [col for col in colunas_necessarias if col not in mapeamento_colunas]
-        
-        if colunas_faltando:
-            st.error(f"❌ Colunas não encontradas no arquivo: {', '.join(colunas_faltando)}")
-            st.info("📋 Colunas disponíveis no arquivo:")
-            
-            # Mostrar colunas disponíveis em formato mais legível
-            colunas_df = pd.DataFrame({
-                'Índice': range(len(colunas_disponiveis)),
-                'Nome da Coluna': colunas_disponiveis,
-                'Tipo de Dados': [str(df[col].dtype) for col in colunas_disponiveis],
-                'Valores Não Nulos': [df[col].notna().sum() for col in colunas_disponiveis]
-            })
-            st.dataframe(colunas_df, use_container_width=True)
-            
-            # Permitir mapeamento manual
-            st.subheader("🔧 Mapeamento Manual de Colunas")
-            mapeamento_manual = {}
-            
-            for col_faltando in colunas_faltando:
-                opcao_selecionada = st.selectbox(
-                    f"Selecione a coluna para '{col_faltando}':",
-                    ["Não mapear"] + colunas_disponiveis,
-                    key=f"map_{col_faltando}"
-                )
-                if opcao_selecionada != "Não mapear":
-                    mapeamento_manual[col_faltando] = opcao_selecionada
-            
-            # Atualizar mapeamento com seleções manuais
-            mapeamento_colunas.update(mapeamento_manual)
-            
-            # Verificar se ainda faltam colunas
-            colunas_ainda_faltando = [col for col in colunas_necessarias if col not in mapeamento_colunas]
-            if colunas_ainda_faltando:
-                st.warning(f"⚠️ Ainda faltam as colunas: {', '.join(colunas_ainda_faltando)}")
-                return None
-
-        # Criar DataFrame processado
-        df_processado = pd.DataFrame()
-        
-        for col_nova, col_antiga in mapeamento_colunas.items():
-            if col_antiga in df.columns:
-                df_processado[col_nova] = df[col_antiga]
-
-        # Verificar se temos todas as colunas necessárias
-        for col in colunas_necessarias:
-            if col not in df_processado.columns:
-                st.error(f"❌ Coluna '{col}' não foi mapeada corretamente!")
-                return None
-
-        # Limpar dados
-        df_processado = df_processado.dropna(subset=colunas_necessarias)
-
-        if df_processado.empty:
-            st.error("❌ Nenhum dado válido encontrado após limpeza!")
-            return None
-
-        # Converter tipos de dados
-        try:
-            # Tentar converter custo para numérico
-            df_processado['Custo proposto'] = pd.to_numeric(
-                df_processado['Custo proposto'], 
-                errors='coerce'
-            )
-            
-            # Remover linhas onde o custo não pôde ser convertido
-            df_processado = df_processado.dropna(subset=['Custo proposto'])
-            
-            if df_processado.empty:
-                st.error("❌ Nenhum valor de custo válido encontrado!")
-                return None
-                
-        except Exception as e:
-            st.warning(f"⚠️ Problema na conversão de custos: {str(e)}")
-
-        # Limpar descrições
-        descrições_limpas = limpar_descricoes(df_processado['Descrição'].tolist())
-        df_processado['Descrições_limpas'] = descrições_limpas
-
-        # Verificar se ainda temos dados após todo o processamento
-        if len(df_processado) == 0:
-            st.error("❌ Nenhum dado válido restante após processamento!")
-            return None
-
-        st.success(f"✅ Arquivo processado com sucesso! {len(df_processado)} projetos carregados.")
-        
-        return df_processado
-        
+        nltk.download('stopwords', quiet=True)
+        nltk.download('punkt', quiet=True)
+        return True
     except Exception as e:
-        st.error(f"❌ Erro ao processar arquivo: {str(e)}")
-        st.error("💡 Verifique se o arquivo não está corrompido e tente novamente.")
+        st.error(f"Erro ao baixar recursos do NLTK: {e}")
+        return False
+
+# Função para processar dados do arquivo carregado
+@st.cache_data
+def processar_dados(uploaded_file):
+    try:
+        info = pd.read_excel(uploaded_file)
+        info_df = pd.DataFrame(info)
+        
+        # Verificar se as colunas necessárias existem
+        required_columns = ['ID do Projeto', 'Descrição', 'Custo proposto', 'Nome do Projeto']
+        missing_columns = [col for col in required_columns if col not in info_df.columns]
+        
+        if missing_columns:
+            st.error(f"❌ Colunas obrigatórias não encontradas: {', '.join(missing_columns)}")
+            st.info("📋 O arquivo deve conter as seguintes colunas: ID do Projeto, Descrição, Custo proposto, Nome do Projeto")
+            return None
+            
+        info_df = info_df[required_columns].dropna()
+        
+        if info_df.empty:
+            st.error("❌ Nenhum dado válido encontrado no arquivo após remover linhas vazias.")
+            return None
+            
+        return info_df
+    except Exception as e:
+        st.error(f"❌ Erro ao processar o arquivo: {e}")
         return None
 
-# Sidebar para configurações e upload
-with st.sidebar:
-    st.header("📁 Upload de Arquivo")
+# Função para limpar texto
+def limpar_texto(texto):
+    stop_words = set(stopwords.words('portuguese'))
+    stop_words.update(['sobre', 'para', 'com', 'sem', 'por', 'em', 'na', 'no', 'da', 'do', 'das', 'dos', 'projeto'])
+
+    texto_limpo = str(texto).lower()
+    texto_limpo = re.sub(r'\s+', ' ', texto_limpo).strip()
+    tokens = word_tokenize(texto_limpo, language='portuguese')
+    tokens_sem_stopwords = []
+    for token in tokens:
+        if token not in stop_words and token.isalpha():
+            tokens_sem_stopwords.append(token)
+    return ' '.join(tokens_sem_stopwords)
+
+# Função principal de busca
+def buscar_projetos(info_df, busca, precisao):
+    # Limpar descrições e nomes (com cache)
+    if 'Descrições_limpas' not in info_df.columns:
+        info_df['Descrições_limpas'] = [limpar_texto(desc) for desc in info_df['Descrição'].tolist()]
+
+    if 'Nomes_limpos' not in info_df.columns:
+        info_df['Nomes_limpos'] = [limpar_texto(nome) for nome in info_df['Nome do Projeto'].tolist()]
+
+    # Limpar busca
+    busca_limpa = limpar_texto(busca)
+
+    # Buscar em descrições
+    matches_desc = []
+    match1_desc = process.extract(busca_limpa, info_df['Descrições_limpas'].tolist(), scorer=fuzz.token_set_ratio,
+                                  limit=10)
+    match2_desc = process.extract(busca_limpa, info_df['Descrições_limpas'].tolist(),
+                                  scorer=fuzz.partial_token_set_ratio, limit=10)
+    matches_desc.extend(match1_desc)
+    matches_desc.extend(match2_desc)
+
+    # Buscar em nomes
+    matches_nome = []
+    match1_nome = process.extract(busca_limpa, info_df['Nomes_limpos'].tolist(), scorer=fuzz.token_set_ratio, limit=10)
+    match2_nome = process.extract(busca_limpa, info_df['Nomes_limpos'].tolist(), scorer=fuzz.partial_token_set_ratio,
+                                  limit=10)
+    matches_nome.extend(match1_nome)
+    matches_nome.extend(match2_nome)
+
+    # Criar DataFrame resultado
+    df_resultado = pd.DataFrame(
+        columns=['ID_Projeto', 'Nome_Projeto', 'Descrição', 'Custo', 'Similaridade', 'Campo_Encontrado'])
+
+    # Processar matches de descrição
+    for descricao, score in matches_desc:
+        if score > precisao:
+            projeto = info_df[info_df['Descrições_limpas'] == descricao]
+            if not projeto.empty:
+                df_resultado.loc[len(df_resultado)] = [
+                    projeto['ID do Projeto'].iloc[0],
+                    projeto['Nome do Projeto'].iloc[0],
+                    projeto['Descrição'].iloc[0],
+                    projeto['Custo proposto'].iloc[0],
+                    score,
+                    'Descrição'
+                ]
+
+    # Processar matches de nome
+    for nome, score in matches_nome:
+        if score > precisao:
+            projeto = info_df[info_df['Nomes_limpos'] == nome]
+            if not projeto.empty:
+                # Verificar se já não existe no resultado (evitar duplicatas)
+                if not any(df_resultado['ID_Projeto'] == projeto['ID do Projeto'].iloc[0]):
+                    df_resultado.loc[len(df_resultado)] = [
+                        projeto['ID do Projeto'].iloc[0],
+                        projeto['Nome do Projeto'].iloc[0],
+                        projeto['Descrição'].iloc[0],
+                        projeto['Custo proposto'].iloc[0],
+                        score,
+                        'Nome'
+                    ]
+
+    # Ordenar por similaridade
+    df_resultado = df_resultado.sort_values('Similaridade', ascending=False).reset_index(drop=True)
+
+    return df_resultado
+
+# Interface principal
+def main():
+    # Download dos recursos NLTK
+    if not download_nltk_resources():
+        st.stop()
+
+    # Seção de upload obrigatório
+    st.markdown("### 📁 Upload do Arquivo")
+    st.info("📋 **Instruções:** Faça upload de um arquivo Excel (.xlsx ou .xls) contendo as colunas: 'ID do Projeto', 'Descrição', 'Custo proposto', 'Nome do Projeto'")
     
-    # Upload de arquivo
-    arquivo_carregado = st.file_uploader(
-        "Escolha um arquivo CSV, XLS ou XLSX",
-        type=['csv', 'xlsx', 'xls'],
-        help="Faça upload do arquivo contendo os dados dos projetos"
+    uploaded_file = st.file_uploader(
+        "Escolha o arquivo Excel com os dados dos projetos",
+        type=['xlsx', 'xls'],
+        help="O arquivo deve conter as colunas obrigatórias: ID do Projeto, Descrição, Custo proposto, Nome do Projeto"
     )
-    
-    if arquivo_carregado is not None:
-        st.success(f"✅ Arquivo carregado: {arquivo_carregado.name}")
+
+    # Verificar se arquivo foi carregado
+    if uploaded_file is None:
+        st.warning("⚠️ **Por favor, faça upload do arquivo Excel para continuar.**")
         
-        # Mostrar informações do arquivo
-        file_details = {
-            "Nome": arquivo_carregado.name,
-            "Tamanho": f"{arquivo_carregado.size / 1024:.2f} KB",
-            "Tipo": arquivo_carregado.type
-        }
-        st.json(file_details)
-    
-    st.markdown("---")
-    
-    st.header("⚙️ Configurações")
-    
-    # Configurações de busca
-    st.subheader("🎯 Parâmetros de Busca")
-    precisao = st.slider(
-        "Precisão (%)",
-        min_value=1,
-        max_value=100,
-        value=70,
-        help="Nível mínimo de similaridade para mostrar resultados"
-    )
+        # Mostrar exemplo de estrutura esperada
+        st.markdown("### 📋 Estrutura Esperada do Arquivo")
+        exemplo_df = pd.DataFrame({
+            'ID do Projeto': [1, 2, 3],
+            'Nome do Projeto': ['Projeto A', 'Projeto B', 'Projeto C'],
+            'Descrição': ['Descrição do projeto A', 'Descrição do projeto B', 'Descrição do projeto C'],
+            'Custo proposto': [10000.00, 25000.50, 15500.75]
+        })
+        st.dataframe(exemplo_df, use_container_width=True)
+        st.stop()
 
-    limite_resultados = st.selectbox(
-        "Máximo de resultados",
-        [5, 10, 15, 20],
-        index=1,
-        help="Número máximo de projetos a serem exibidos"
-    )
+    # Processar dados do arquivo carregado
+    with st.spinner("📊 Processando arquivo..."):
+        info_df = processar_dados(uploaded_file)
+    
+    if info_df is None:
+        st.stop()
 
-# Verificar se há arquivo carregado
-if arquivo_carregado is not None:
-    # Processar arquivo carregado
-    with st.spinner("🔄 Processando arquivo carregado..."):
-        info_df = processar_arquivo(arquivo_carregado)
-else:
-    # Mostrar instruções para upload
-    st.info("📁 **Faça upload de um arquivo para começar a busca**")
+    # Mostrar sucesso e informações do dataset
+    st.success("✅ Arquivo carregado e processado com sucesso!")
     
-    st.markdown("""
-    ### 📋 Instruções:
+    # Sidebar com informações do dataset
+    st.sidebar.header("📊 Informações do Dataset")
+    st.sidebar.metric("Total de Projetos", len(info_df))
+    st.sidebar.metric("Custo Total", f"R\$ {info_df['Custo proposto'].sum():,.2f}")
     
-    1. **📁 Faça upload** de um arquivo CSV, XLS ou XLSX na barra lateral
-    2. **📊 Certifique-se** de que o arquivo contém as seguintes colunas:
-       - `ID do Projeto` (ou similar)
-       - `Nome do Projeto` (ou similar)
-       - `Descrição` (ou similar)
-       - `Custo proposto` (ou similar)
-    3. **�� Use a busca** para encontrar projetos similares
-    """)
-    
-    # Exemplo de dados
-    st.subheader("📝 Exemplo de estrutura esperada:")
-    exemplo_dados = pd.DataFrame({
-        'ID do Projeto': [1, 2, 3],
-        'Nome do Projeto': ['Sistema de Gestão', 'Reforma Predial', 'Compra Equipamentos'],
-        'Descrição': [
-            'Desenvolvimento de sistema de gestão integrada',
-            'Reforma completa do prédio administrativo',
-            'Aquisição de equipamentos de informática'
-        ],
-        'Custo proposto': [150000.00, 85000.00, 45000.00]
-    })
-    st.dataframe(exemplo_dados, use_container_width=True)
-    
-    # Botão para download do exemplo
-    csv_exemplo = exemplo_dados.to_csv(index=False)
-    st.download_button(
-        label="📥 Download Exemplo CSV",
-        data=csv_exemplo,
-        file_name="exemplo_projetos.csv",
-        mime="text/csv",
-        help="Baixe este arquivo como exemplo de estrutura"
-    )
-    
-    info_df = None
-
-# Se os dados foram carregados com sucesso
-if info_df is not None:
-    # Mostrar estatísticas dos dados
-    col1, col2, col3, col4 = st.columns(4)
-
+    # Mostrar estatísticas básicas
+    col1, col2, col3 = st.columns(3)
     with col1:
         st.metric("📊 Total de Projetos", len(info_df))
-
     with col2:
-        custo_total = info_df['Custo proposto'].sum()
-        st.metric("💰 Custo Total", f"R$ {custo_total:,.2f}")
-
+        st.metric("💰 Custo Total", f"R\$ {info_df['Custo proposto'].sum():,.2f}")
     with col3:
-        custo_medio = info_df['Custo proposto'].mean()
-        st.metric("📈 Custo Médio", f"R$ {custo_medio:,.2f}")
-
-    with col4:
-        custo_max = info_df['Custo proposto'].max()
-        st.metric("🔝 Maior Custo", f"R$ {custo_max:,.2f}")
+        st.metric("💸 Custo Médio", f"R\$ {info_df['Custo proposto'].mean():,.2f}")
 
     st.markdown("---")
 
     # Interface de busca
-    st.subheader("🔍 Buscar Projetos")
-
+    st.markdown("### 🔍 Busca de Projetos")
+    
     col1, col2 = st.columns([3, 1])
 
     with col1:
         busca = st.text_input(
-            "Digite a descrição do projeto:",
-            placeholder="Ex: sistema de gestão, reforma de prédio, compra de equipamentos...",
-            help="Digite palavras-chave relacionadas ao projeto que você está procurando"
+            "**Descrição do projeto:**",
+            placeholder="Digite palavras-chave para buscar projetos...",
+            help="Digite uma descrição ou palavras-chave relacionadas ao projeto que você está procurando"
         )
 
     with col2:
-        buscar_btn = st.button("🔍 Buscar", type="primary", use_container_width=True)
+        precisao = st.slider(
+            "**Precisão (%):**",
+            min_value=1,
+            max_value=100,
+            value=70,
+            help="Ajuste o nível de precisão da busca. Valores mais altos retornam resultados mais específicos."
+        )
 
-    # Realizar busca
-    if (buscar_btn or busca) and busca.strip():
-        with st.spinner("🔍 Buscando projetos similares..."):
-            # Limpar busca
-            busca_limpa = str(busca).lower()
-            busca_limpa = re.sub(r'\s+', ' ', busca_limpa).strip()
+    # Botão de busca
+    if st.button("🔍 Buscar Projetos", type="primary", use_container_width=True):
+        if busca.strip():
+            with st.spinner("🔄 Buscando projetos..."):
+                df_resultado = buscar_projetos(info_df, busca, precisao)
 
-            # Encontrar matches
-            matches = process.extract(
-                busca_limpa,
-                info_df['Descrições_limpas'].tolist(),
-                scorer=fuzz.token_set_ratio,
-                limit=limite_resultados
-            )
+            if not df_resultado.empty:
+                st.success(f"✅ Encontrados {len(df_resultado)} projeto(s) com similaridade acima de {precisao}%")
 
-            # Criar DataFrame de resultados
-            resultados = []
-            for descricao, score in matches:
-                if score >= precisao:
-                    projeto = info_df[info_df['Descrições_limpas'] == descricao].iloc[0]
-                    resultados.append({
-                        'ID': projeto['ID do Projeto'],
-                        'Nome': projeto['Nome do Projeto'],
-                        'Descrição': projeto['Descrição'],
-                        'Custo': projeto['Custo proposto'],
-                        'Similaridade': score
-                    })
+                # Mostrar resultados
+                st.markdown("### 📋 Resultados da Busca")
 
-            # Mostrar resultados
-            if resultados:
-                st.success(f"✅ {len(resultados)} projeto(s) encontrado(s) com similaridade ≥ {precisao}%")
+                # Configurar exibição das colunas
+                df_display = df_resultado.copy()
+                df_display['Custo'] = df_display['Custo'].apply(lambda x: f"R\$ {x:,.2f}")
+                df_display['Similaridade'] = df_display['Similaridade'].apply(lambda x: f"{x:.1f}%")
 
-                # Tabs para diferentes visualizações
-                tab1, tab2, tab3 = st.tabs(["📋 Lista Detalhada", "📊 Tabela", "📈 Gráfico"])
+                # Exibir tabela
+                st.dataframe(
+                    df_display,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "ID_Projeto": st.column_config.NumberColumn("ID", width="small"),
+                        "Nome_Projeto": st.column_config.TextColumn("Nome do Projeto", width="medium"),
+                        "Descrição": st.column_config.TextColumn("Descrição", width="large"),
+                        "Custo": st.column_config.TextColumn("Custo", width="small"),
+                        "Similaridade": st.column_config.TextColumn("Similaridade", width="small"),
+                        "Campo_Encontrado": st.column_config.TextColumn("Campo", width="small")
+                    }
+                )
 
-                with tab1:
-                    # Mostrar cada resultado em um card
-                    for i, resultado in enumerate(resultados):
-                        with st.expander(f"🎯 {resultado['Similaridade']:.1f}% - {resultado['Nome']}",
-                                         expanded=(i == 0)):
-                            # Layout em duas colunas
-                            col1, col2 = st.columns([3, 1])
+                # Estatísticas dos resultados
+                st.markdown("### 📈 Estatísticas dos Resultados")
+                col1, col2, col3, col4 = st.columns(4)
 
-                            with col1:
-                                # Informações principais do projeto
-                                st.markdown(f"**🆔 ID do Projeto:** {resultado['ID']}")
-                                st.markdown(f"**📝 Nome do Projeto:** {resultado['Nome']}")
-                                st.markdown(f"**📄 Descrição:**")
-                                st.markdown(f"_{resultado['Descrição']}_")
-                                st.markdown(f"**💰 Custo Proposto:** R$ {resultado['Custo']:,.2f}")
+                with col1:
+                    st.metric("Total de Projetos", len(df_resultado))
 
-                            with col2:
-                                # Métricas visuais
-                                st.metric("🎯 Similaridade", f"{resultado['Similaridade']:.1f}%")
+                with col2:
+                    custo_total = df_resultado['Custo'].sum()
+                    st.metric("Custo Total", f"R\$ {custo_total:,.2f}")
 
-                                # Indicador visual de similaridade
-                                if resultado['Similaridade'] >= 90:
-                                    st.success("🟢 Excelente match")
-                                elif resultado['Similaridade'] >= 80:
-                                    st.info("🔵 Bom match")
-                                elif resultado['Similaridade'] >= 70:
-                                    st.warning("🟡 Match moderado")
-                                else:
-                                    st.error("🔴 Match baixo")
+                with col3:
+                    similaridade_media = df_resultado['Similaridade'].mean()
+                    st.metric("Similaridade Média", f"{similaridade_media:.1f}%")
 
-                            # Separador visual
-                            st.markdown("---")
+                with col4:
+                    melhor_match = df_resultado['Similaridade'].max()
+                    st.metric("Melhor Match", f"{melhor_match:.1f}%")
 
-                with tab2:
-                    # Tabela formatada
-                    df_resultados = pd.DataFrame(resultados)
-                    df_resultados_display = df_resultados.copy()
-                    df_resultados_display['Custo'] = df_resultados_display['Custo'].apply(lambda x: f"R$ {x:,.2f}")
-                    df_resultados_display['Similaridade'] = df_resultados_display['Similaridade'].apply(
-                        lambda x: f"{x:.1f}%")
-
-                    st.dataframe(
-                        df_resultados_display,
-                        use_container_width=True,
-                        hide_index=True
-                    )
-
-                    # Botão para download
-                    csv = df_resultados.to_csv(index=False)
-                    st.download_button(
-                        label="📥 Download CSV",
-                        data=csv,
-                        file_name=f"busca_projetos_{busca[:20].replace(' ', '_')}.csv",
-                        mime="text/csv"
-                    )
-
-                with tab3:
-                    # Gráfico de similaridade
-                    df_grafico = pd.DataFrame(resultados)
-                    st.subheader("🎯 Similaridade dos Projetos")
-                    st.bar_chart(
-                        data=df_grafico.set_index('Nome')['Similaridade'],
-                        height=400
-                    )
-
-                    # Gráfico de custos
-                    st.subheader("💰 Distribuição de Custos")
-                    st.bar_chart(
-                        data=df_grafico.set_index('Nome')['Custo'],
-                        height=400
-                    )
+                # Opção de download
+                csv = df_resultado.to_csv(index=False)
+                st.download_button(
+                    label="📥 Baixar Resultados (CSV)",
+                    data=csv,
+                    file_name=f"resultados_busca_{busca[:20]}.csv",
+                    mime="text/csv"
+                )
 
             else:
-                st.warning(f"⚠️ Nenhum projeto encontrado com similaridade ≥ {precisao}%")
-                st.info("💡 Dicas:")
-                st.write("• Tente diminuir o nível de precisão")
-                st.write("• Use palavras-chave mais gerais")
-                st.write("• Verifique a ortografia")
+                st.warning(
+                    f"⚠️ Nenhum projeto encontrado com similaridade acima de {precisao}%. Tente diminuir a precisão ou usar outras palavras-chave.")
+        else:
+            st.error("❌ Por favor, insira uma descrição para buscar.")
 
-    # Mostrar preview dos dados (com tratamento de erro)
-    with st.expander("👀 Preview dos Dados Carregados"):
-        try:
-            # Verificar se as colunas existem antes de tentar exibi-las
-            colunas_preview = []
-            for col in ['ID do Projeto', 'Nome do Projeto', 'Custo proposto']:
-                if col in info_df.columns:
-                    colunas_preview.append(col)
-            
-            if colunas_preview:
-                preview_df = info_df[colunas_preview].head(10)
-                # Remover possíveis colunas duplicadas no preview
-                preview_df = preview_df.loc[:, ~preview_df.columns.duplicated()]
-                st.dataframe(preview_df, use_container_width=True)
-            else:
-                st.warning("⚠️ Colunas para preview não encontradas")
-                st.dataframe(info_df.head(10), use_container_width=True)
-                
-        except Exception as e:
-            st.error(f"❌ Erro ao exibir preview: {str(e)}")
-            # Tentar mostrar informações básicas do DataFrame
-            st.write("**Informações do DataFrame:**")
-            st.write(f"- Número de linhas: {len(info_df)}")
-            st.write(f"- Número de colunas: {len(info_df.columns)}")
-            st.write(f"- Colunas: {list(info_df.columns)}")
+    # Mostrar amostra dos dados
+    if st.checkbox("�� Visualizar amostra dos dados"):
+        st.markdown("### 📊 Amostra do Dataset")
+        st.dataframe(info_df.head(10), use_container_width=True)
 
-# Footer
-st.markdown("---")
-st.markdown(
-    """
-    <div style='text-align: center; color: gray;'>
-        🔍 Buscador de Projetos | Upload de Arquivo | Desenvolvido com Streamlit
-    </div>
-    """,
-    unsafe_allow_html=True
-)
+if __name__ == "__main__":
+    main()

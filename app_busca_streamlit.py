@@ -17,6 +17,7 @@ st.set_page_config(
 st.title("🔍 Sistema de Busca de Projetos")
 st.markdown("---")
 
+
 # Download dos recursos do NLTK (com cache para evitar downloads repetidos)
 @st.cache_resource
 def download_nltk_resources():
@@ -28,32 +29,36 @@ def download_nltk_resources():
         st.error(f"Erro ao baixar recursos do NLTK: {e}")
         return False
 
-# Função para processar dados do arquivo carregado
-@st.cache_data
-def processar_dados(uploaded_file):
+
+# Função para validar e processar o arquivo carregado
+def processar_arquivo(uploaded_file):
     try:
+        # Ler o arquivo Excel
         info = pd.read_excel(uploaded_file)
         info_df = pd.DataFrame(info)
-        
+
         # Verificar se as colunas necessárias existem
-        required_columns = ['ID do Projeto', 'Descrição', 'Custo proposto', 'Nome do Projeto']
-        missing_columns = [col for col in required_columns if col not in info_df.columns]
-        
-        if missing_columns:
-            st.error(f"❌ Colunas obrigatórias não encontradas: {', '.join(missing_columns)}")
-            st.info("📋 O arquivo deve conter as seguintes colunas: ID do Projeto, Descrição, Custo proposto, Nome do Projeto")
+        colunas_necessarias = ['ID do Projeto', 'Descrição', 'Custo proposto', 'Nome do Projeto']
+        colunas_faltantes = [col for col in colunas_necessarias if col not in info_df.columns]
+
+        if colunas_faltantes:
+            st.error(f"❌ As seguintes colunas são obrigatórias e não foram encontradas: {', '.join(colunas_faltantes)}")
+            st.info("💡 **Colunas necessárias:** ID do Projeto, Descrição, Custo proposto, Nome do Projeto")
             return None
-            
-        info_df = info_df[required_columns].dropna()
-        
+
+        # Filtrar apenas as colunas necessárias e remover linhas vazias
+        info_df = info_df[colunas_necessarias].dropna()
+
         if info_df.empty:
-            st.error("❌ Nenhum dado válido encontrado no arquivo após remover linhas vazias.")
+            st.error("❌ O arquivo não contém dados válidos após a limpeza.")
             return None
-            
+
         return info_df
+
     except Exception as e:
         st.error(f"❌ Erro ao processar o arquivo: {e}")
         return None
+
 
 # Função para limpar texto
 def limpar_texto(texto):
@@ -68,6 +73,7 @@ def limpar_texto(texto):
         if token not in stop_words and token.isalpha():
             tokens_sem_stopwords.append(token)
     return ' '.join(tokens_sem_stopwords)
+
 
 # Função principal de busca
 def buscar_projetos(info_df, busca, precisao):
@@ -137,66 +143,73 @@ def buscar_projetos(info_df, busca, precisao):
 
     return df_resultado
 
+
 # Interface principal
 def main():
     # Download dos recursos NLTK
     if not download_nltk_resources():
         st.stop()
 
-    # Seção de upload obrigatório
-    st.markdown("### 📁 Upload do Arquivo")
-    st.info("📋 **Instruções:** Faça upload de um arquivo Excel (.xlsx ou .xls) contendo as colunas: 'ID do Projeto', 'Descrição', 'Custo proposto', 'Nome do Projeto'")
-    
+    # Seção de upload de arquivo
+    st.header("📁 Upload do Arquivo de Dados")
+
+    # Informações sobre o formato esperado
+    with st.expander("ℹ️ Formato do Arquivo Esperado", expanded=False):
+        st.markdown("""
+        **O arquivo Excel deve conter as seguintes colunas:**
+        - `ID do Projeto`: Identificador único do projeto
+        - `Nome do Projeto`: Nome/título do projeto
+        - `Descrição`: Descrição detalhada do projeto
+        - `Custo proposto`: Valor monetário do projeto
+
+        **Formatos aceitos:** .xlsx, .xls
+        """)
+
     uploaded_file = st.file_uploader(
         "Escolha o arquivo Excel com os dados dos projetos",
         type=['xlsx', 'xls'],
-        help="O arquivo deve conter as colunas obrigatórias: ID do Projeto, Descrição, Custo proposto, Nome do Projeto"
+        help="Faça upload de um arquivo Excel contendo os dados dos projetos"
     )
 
     # Verificar se arquivo foi carregado
     if uploaded_file is None:
-        st.warning("⚠️ **Por favor, faça upload do arquivo Excel para continuar.**")
-        
-        # Mostrar exemplo de estrutura esperada
-        st.markdown("### 📋 Estrutura Esperada do Arquivo")
+        st.info("👆 **Por favor, faça upload do arquivo Excel para começar a busca.**")
+        st.markdown("---")
+
+        # Mostrar exemplo de estrutura de dados
+        st.subheader("📋 Exemplo de Estrutura de Dados")
         exemplo_df = pd.DataFrame({
             'ID do Projeto': [1, 2, 3],
-            'Nome do Projeto': ['Projeto A', 'Projeto B', 'Projeto C'],
-            'Descrição': ['Descrição do projeto A', 'Descrição do projeto B', 'Descrição do projeto C'],
-            'Custo proposto': [10000.00, 25000.50, 15500.75]
+            'Nome do Projeto': ['Sistema de Gestão', 'App Mobile', 'Website Corporativo'],
+            'Descrição': ['Sistema para gestão de projetos internos', 'Aplicativo mobile para vendas',
+                          'Website institucional da empresa'],
+            'Custo proposto': [50000.00, 25000.00, 15000.00]
         })
         st.dataframe(exemplo_df, use_container_width=True)
-        st.stop()
+        return
 
-    # Processar dados do arquivo carregado
-    with st.spinner("📊 Processando arquivo..."):
-        info_df = processar_dados(uploaded_file)
-    
+    # Processar arquivo carregado
+    info_df = processar_arquivo(uploaded_file)
     if info_df is None:
-        st.stop()
+        return
 
-    # Mostrar sucesso e informações do dataset
-    st.success("✅ Arquivo carregado e processado com sucesso!")
-    
+    # Mostrar sucesso no carregamento
+    st.success("✅ Arquivo carregado com sucesso!")
+
     # Sidebar com informações do dataset
     st.sidebar.header("📊 Informações do Dataset")
     st.sidebar.metric("Total de Projetos", len(info_df))
     st.sidebar.metric("Custo Total", f"R\$ {info_df['Custo proposto'].sum():,.2f}")
-    
-    # Mostrar estatísticas básicas
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("📊 Total de Projetos", len(info_df))
-    with col2:
-        st.metric("💰 Custo Total", f"R\$ {info_df['Custo proposto'].sum():,.2f}")
-    with col3:
-        st.metric("💸 Custo Médio", f"R\$ {info_df['Custo proposto'].mean():,.2f}")
+
+    # Mostrar prévia dos dados
+    with st.expander("👀 Visualizar dados carregados", expanded=False):
+        st.dataframe(info_df.head(10), use_container_width=True)
 
     st.markdown("---")
 
     # Interface de busca
-    st.markdown("### 🔍 Busca de Projetos")
-    
+    st.header("🔍 Busca de Projetos")
+
     col1, col2 = st.columns([3, 1])
 
     with col1:
@@ -208,7 +221,7 @@ def main():
 
     with col2:
         precisao = st.slider(
-            "**Precisão (%):**",
+            "🎯 **Precisão (%):**",
             min_value=1,
             max_value=100,
             value=70,
@@ -281,10 +294,6 @@ def main():
         else:
             st.error("❌ Por favor, insira uma descrição para buscar.")
 
-    # Mostrar amostra dos dados
-    if st.checkbox("�� Visualizar amostra dos dados"):
-        st.markdown("### 📊 Amostra do Dataset")
-        st.dataframe(info_df.head(10), use_container_width=True)
 
 if __name__ == "__main__":
     main()
